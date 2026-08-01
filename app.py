@@ -1,5 +1,7 @@
 """RSM 响应面分析 — 交互式教学平台."""
 
+import itertools
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -220,31 +222,39 @@ elif page_key == "design":
     实验设计是 RSM 的第一步。选择合适的设计方案可以在最少的实验次数下获得最多的信息。
     """)
 
-    design_type = st.selectbox("设计类型", ["中心复合设计 (CCD)", "Box-Behnken 设计 (BBD)", "全因子设计"])
+    st.info("本案例用于探究 DES-5 含水量、DES-5 摩尔比和固液比对花椒多糖提取量的影响。")
+    design_type = st.selectbox(
+        "设计类型",
+        ["指定水平全因子设计", "中心复合设计 (CCD)", "Box-Behnken 设计 (BBD)", "全因子设计"],
+    )
 
     st.markdown("---")
     st.subheader("因子设定")
-    min_nf = 3 if design_type == "Box-Behnken 设计 (BBD)" else 2
-    n_factors = st.slider("因子数量", min_value=min_nf, max_value=5, value=3)
-
-    default_factors = [
-        ("温度", 60, 80, "°C"),
-        ("pH", 5, 9, ""),
-        ("时间", 30, 90, "min"),
-        ("浓度", 1, 5, "g/L"),
-        ("转速", 100, 300, "rpm"),
+    factor_specs = [
+        {
+            "name": "DES-5 含水量",
+            "values": [10, 20, 30, 40, 50],
+            "labels": ["10%", "20%", "30%", "40%", "50%"],
+            "unit": "%",
+        },
+        {
+            "name": "DES-5 摩尔比",
+            "values": [2, 1, 1 / 2, 1 / 3, 1 / 4],
+            "labels": ["2∶1", "1∶1", "1∶2", "1∶3", "1∶4"],
+            "unit": "",
+        },
+        {
+            "name": "固液比",
+            "values": [10, 20, 30, 40, 50, 60],
+            "labels": ["1∶10", "1∶20", "1∶30", "1∶40", "1∶50", "1∶60"],
+            "unit": "g/mL",
+        },
     ]
 
-    factors = []
-    cols = st.columns(n_factors)
-    for i in range(n_factors):
-        with cols[i]:
-            name, lo, hi, unit = default_factors[i]
-            fname = st.text_input(f"因子 {i+1} 名称", value=name, key=f"fn_{i}")
-            flow = st.number_input("低水平", value=float(lo), key=f"fl_{i}")
-            fhigh = st.number_input("高水平", value=float(hi), key=f"fh_{i}")
-            funit = st.text_input("单位", value=unit, key=f"fu_{i}")
-            factors.append(Factor(fname, flow, fhigh, funit))
+    factors = [
+        Factor(spec["name"], min(spec["values"]), max(spec["values"]), spec["unit"])
+        for spec in factor_specs
+    ]
 
     designer = ExperimentDesigner(factors)
 
@@ -252,11 +262,28 @@ elif page_key == "design":
     st.subheader("因子摘要")
     st.dataframe(designer.summary(), use_container_width=True, hide_index=True)
 
+    st.subheader("实验水平")
+    level_df = pd.DataFrame({
+        "因素": [spec["name"] for spec in factor_specs],
+        "预设水平": ["、".join(spec["labels"]) for spec in factor_specs],
+    })
+    st.dataframe(level_df, use_container_width=True, hide_index=True)
+
     st.markdown("---")
     st.subheader("设计矩阵")
 
     try:
-        if "CCD" in design_type:
+        if design_type == "指定水平全因子设计":
+            level_rows = list(itertools.product(*(spec["values"] for spec in factor_specs)))
+            coded_matrix = np.array([
+                [factor.encode(value) for factor, value in zip(factors, row)]
+                for row in level_rows
+            ])
+            design_df = designer.custom(coded_matrix)
+            display_rows = list(itertools.product(*(spec["labels"] for spec in factor_specs)))
+            for i, factor in enumerate(factors):
+                design_df[factor.name] = [row[i] for row in display_rows]
+        elif "CCD" in design_type:
             alpha_opt = st.selectbox("alpha 参数", ["orthogonal", "rotatable"])
             face_opt = st.selectbox("面类型", ["circumscribed", "inscribed", "faced"])
             design_df = designer.central_composite(alpha=alpha_opt, face=face_opt)
@@ -273,7 +300,15 @@ elif page_key == "design":
         st.download_button("📥 下载设计矩阵 (CSV)", csv, "design_matrix.csv", "text/csv")
 
         with st.expander("📖 设计类型说明"):
-            if "CCD" in design_type:
+            if design_type == "指定水平全因子设计":
+                st.markdown("""
+                **指定水平全因子设计** 使用实验方案中给出的全部水平组合：
+                - 含水量：5 个水平
+                - 摩尔比：5 个水平
+                - 固液比：6 个水平
+                - 共 $5 \\times 5 \\times 6 = 150$ 组实验
+                """)
+            elif "CCD" in design_type:
                 st.markdown("""
                 **中心复合设计 (Central Composite Design)** 由三部分组成：
                 - **因子部分**：$2^k$ 全因子或部分因子设计点
