@@ -222,50 +222,80 @@ elif page_key == "design":
     实验设计是 RSM 的第一步。选择合适的设计方案可以在最少的实验次数下获得最多的信息。
     """)
 
-    st.info("本案例用于探究 DES-5 含水量、DES-5 摩尔比和超声时间对花椒多糖提取量的影响。")
+    st.info("以下案例用于探究 DES-5 含水量、DES-5 摩尔比和超声时间对花椒多糖提取量的影响。你可以在下方直接编辑每个因子的三个水平（低水平 / 中水平 / 高水平）。")
     design_type = st.selectbox(
         "设计类型",
         ["指定水平全因子设计", "中心复合设计 (CCD)", "Box-Behnken 设计 (BBD)", "全因子设计"],
     )
 
+    # ── 因子设定：三水平可编辑 ──
     st.markdown("---")
-    st.subheader("因子设定")
-    factor_specs = [
-        {
-            "name": "DES-5 含水量",
-            "values": [10, 20, 30, 40, 50],
-            "labels": ["10%", "20%", "30%", "40%", "50%"],
-            "unit": "%",
+    st.subheader("因子设定（可编辑三水平）")
+
+    default_factor_table = pd.DataFrame({
+        "因子": ["DES-5 含水量", "DES-5 摩尔比", "超声时间"],
+        "低水平": [10.0, 0.5, 20.0],
+        "中水平": [30.0, 1.0, 60.0],
+        "高水平": [50.0, 2.0, 100.0],
+        "单位": ["%", "", "min"],
+    })
+
+    edited_factors = st.data_editor(
+        default_factor_table,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "因子": st.column_config.TextColumn("因子名称", width="medium"),
+            "低水平": st.column_config.NumberColumn("低水平 (编码 -1)", format="%.4f"),
+            "中水平": st.column_config.NumberColumn("中水平 (编码 0)", format="%.4f"),
+            "高水平": st.column_config.NumberColumn("高水平 (编码 +1)", format="%.4f"),
+            "单位": st.column_config.TextColumn("单位", width="small"),
         },
-        {
-            "name": "DES-5 摩尔比",
-            "values": [2, 1, 1 / 2, 1 / 3, 1 / 4],
-            "labels": ["2∶1", "1∶1", "1∶2", "1∶3", "1∶4"],
-            "unit": "",
-        },
-        {
-            "name": "超声时间",
-            "values": [20, 40, 60, 80, 100],
-            "labels": ["20 min", "40 min", "60 min", "80 min", "100 min"],
-            "unit": "min",
-        },
-    ]
+        key="design_factor_editor",
+    )
+
+    factor_specs = edited_factors.to_dict("records")
+
+    # 校验每个因子满足 低水平 < 中水平 < 高水平
+    levels_ok = True
+    for spec in factor_specs:
+        low, center, high = spec["低水平"], spec["中水平"], spec["高水平"]
+        if not (low < center < high):
+            levels_ok = False
+    if not levels_ok:
+        st.warning("⚠️ 请确保每个因子的三个水平满足 **低水平 < 中水平 < 高水平**。")
 
     factors = [
-        Factor(spec["name"], min(spec["values"]), max(spec["values"]), spec["unit"])
+        Factor(spec["因子"], spec["低水平"], spec["高水平"], spec["单位"])
         for spec in factor_specs
     ]
+    factor_names = [f.name for f in factors]
 
     designer = ExperimentDesigner(factors)
 
     st.markdown("---")
     st.subheader("因子摘要")
-    st.dataframe(designer.summary(), use_container_width=True, hide_index=True)
+    summary_rows = []
+    for spec in factor_specs:
+        summary_rows.append({
+            "因子": spec["因子"],
+            "低水平": spec["低水平"],
+            "中水平": spec["中水平"],
+            "高水平": spec["高水平"],
+            "半范围": (spec["高水平"] - spec["低水平"]) / 2,
+            "单位": spec["单位"],
+        })
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
     st.subheader("实验水平")
     level_df = pd.DataFrame({
-        "因素": [spec["name"] for spec in factor_specs],
-        "预设水平": ["、".join(spec["labels"]) for spec in factor_specs],
+        "因素": [spec["因子"] for spec in factor_specs],
+        "三水平": [
+            f"{spec['低水平']:g} · {spec['中水平']:g} · {spec['高水平']:g} {spec['单位']}".strip()
+            for spec in factor_specs
+        ],
+        "编码": ["-1 · 0 · +1"] * len(factor_specs),
     })
     st.dataframe(level_df, use_container_width=True, hide_index=True)
 
@@ -274,15 +304,24 @@ elif page_key == "design":
 
     try:
         if design_type == "指定水平全因子设计":
-            level_rows = list(itertools.product(*(spec["values"] for spec in factor_specs)))
-            coded_matrix = np.array([
-                [factor.encode(value) for factor, value in zip(factors, row)]
-                for row in level_rows
-            ])
-            design_df = designer.custom(coded_matrix)
-            display_rows = list(itertools.product(*(spec["labels"] for spec in factor_specs)))
-            for i, factor in enumerate(factors):
-                design_df[factor.name] = [row[i] for row in display_rows]
+            # 三水平全因子设计：低(-1) / 中(0) / 高(+1)
+            coded_choices = [-1.0, 0.0, 1.0]
+            coded_rows = list(itertools.product(coded_choices, repeat=len(factor_specs)))
+            code_matrix = np.array(coded_rows, dtype=float)
+
+            def _natural_from_coded(spec: dict, coded: float) -> float:
+                if abs(coded + 1.0) < 1e-9:
+                    return spec["低水平"]
+                if abs(coded) < 1e-9:
+                    return spec["中水平"]
+                return spec["高水平"]
+
+            design_df = pd.DataFrame(
+                [[_natural_from_coded(sp, c) for sp, c in zip(factor_specs, cr)] for cr in coded_rows],
+                columns=factor_names,
+            )
+            for i, spec in enumerate(factor_specs):
+                design_df[f"coded_{spec['因子']}"] = code_matrix[:, i]
         elif "CCD" in design_type:
             alpha_opt = st.selectbox("alpha 参数", ["orthogonal", "rotatable"])
             face_opt = st.selectbox("面类型", ["circumscribed", "inscribed", "faced"])
@@ -302,12 +341,10 @@ elif page_key == "design":
         with st.expander("📖 设计类型说明"):
             if design_type == "指定水平全因子设计":
                 st.markdown("""
-                **指定水平全因子设计** 使用实验方案中给出的全部水平组合：
-                - 含水量：5 个水平
-                - 摩尔比：5 个水平
-                - 超声时间：5 个水平
-                - 共 $5 \\times 5 \\times 5 = 125$ 组实验
-                """)
+                **指定水平全因子设计** 使用你在上方设定的三水平组合（低 / 中 / 高）：
+                - 每个因子取 **3 个水平**（低水平 -1、中水平 0、高水平 +1）
+                - 共 $3^{k}$ 组实验（当前 $k = %d$，即 $3 \\times 3 \\times 3 = %d$ 组）
+                """ % (len(factor_specs), 3 ** len(factor_specs)))
             elif "CCD" in design_type:
                 st.markdown("""
                 **中心复合设计 (Central Composite Design)** 由三部分组成：
