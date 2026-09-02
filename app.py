@@ -302,78 +302,110 @@ elif page_key == "design":
     st.markdown("---")
     st.subheader("设计矩阵")
 
-    try:
-        if design_type == "指定水平全因子设计":
-            # 三水平全因子设计：低(-1) / 中(0) / 高(+1)
-            coded_choices = [-1.0, 0.0, 1.0]
-            coded_rows = list(itertools.product(coded_choices, repeat=len(factor_specs)))
-            code_matrix = np.array(coded_rows, dtype=float)
+    # 设计相关参数控件（先渲染，便于构造签名并在按钮点击时用于生成）
+    ccd_alpha = None
+    ccd_face = None
+    n_levels = 3
+    if "CCD" in design_type:
+        ccd_alpha = st.selectbox("alpha 参数", ["orthogonal", "rotatable"], key="design_ccd_alpha")
+        ccd_face = st.selectbox("面类型", ["circumscribed", "inscribed", "faced"], key="design_ccd_face")
+    elif "BBD" not in design_type and design_type != "指定水平全因子设计":
+        n_levels = st.slider("每因子水平数", 2, 5, 3, key="design_n_levels")
 
-            def _natural_from_coded(spec: dict, coded: float) -> float:
-                if abs(coded + 1.0) < 1e-9:
-                    return spec["低水平"]
-                if abs(coded) < 1e-9:
-                    return spec["中水平"]
-                return spec["高水平"]
+    # 当前设置的指纹：用于判断用户修改后设计是否已过期
+    current_sig = (
+        design_type,
+        tuple((s["因子"], s["低水平"], s["中水平"], s["高水平"]) for s in factor_specs),
+        ccd_alpha, ccd_face, n_levels,
+    )
 
-            design_df = pd.DataFrame(
-                [[_natural_from_coded(sp, c) for sp, c in zip(factor_specs, cr)] for cr in coded_rows],
-                columns=factor_names,
-            )
-            for i, spec in enumerate(factor_specs):
-                design_df[f"coded_{spec['因子']}"] = code_matrix[:, i]
-        elif "CCD" in design_type:
-            alpha_opt = st.selectbox("alpha 参数", ["orthogonal", "rotatable"])
-            face_opt = st.selectbox("面类型", ["circumscribed", "inscribed", "faced"])
-            design_df = designer.central_composite(alpha=alpha_opt, face=face_opt)
-        elif "BBD" in design_type:
-            design_df = designer.box_behnken()
-        else:
-            levels = st.slider("每因子水平数", 2, 5, 3)
-            design_df = designer.full_factorial(levels)
+    regenerate = st.button("🔄 重新生成设计矩阵", type="primary")
+    should_generate = regenerate or not st.session_state.get("design_done", False)
 
+    if should_generate:
+        try:
+            if design_type == "指定水平全因子设计":
+                # 三水平全因子设计：低(-1) / 中(0) / 高(+1)
+                coded_choices = [-1.0, 0.0, 1.0]
+                coded_rows = list(itertools.product(coded_choices, repeat=len(factor_specs)))
+                code_matrix = np.array(coded_rows, dtype=float)
+
+                def _natural_from_coded(spec: dict, coded: float) -> float:
+                    if abs(coded + 1.0) < 1e-9:
+                        return spec["低水平"]
+                    if abs(coded) < 1e-9:
+                        return spec["中水平"]
+                    return spec["高水平"]
+
+                design_df = pd.DataFrame(
+                    [[_natural_from_coded(sp, c) for sp, c in zip(factor_specs, cr)] for cr in coded_rows],
+                    columns=factor_names,
+                )
+                for i, spec in enumerate(factor_specs):
+                    design_df[f"coded_{spec['因子']}"] = code_matrix[:, i]
+            elif "CCD" in design_type:
+                design_df = designer.central_composite(alpha=ccd_alpha, face=ccd_face)
+            elif "BBD" in design_type:
+                design_df = designer.box_behnken()
+            else:
+                design_df = designer.full_factorial(n_levels)
+
+            st.session_state["design_df"] = design_df
+            st.session_state["design_sig"] = current_sig
+            st.session_state["design_error"] = None
+            st.session_state["design_done"] = True
+        except Exception as e:
+            st.session_state["design_df"] = None
+            st.session_state["design_error"] = str(e)
+            st.session_state["design_done"] = True
+
+    # 若用户改了设置但尚未重新生成，提示
+    if st.session_state.get("design_sig") is not None and st.session_state.get("design_sig") != current_sig:
+        st.info("⚠️ 因子设定或设计类型已修改，但设计矩阵仍是基于旧设置生成。请点击「🔄 重新生成设计矩阵」以更新。")
+
+    design_df = st.session_state.get("design_df")
+    if design_df is not None:
         st.info(f"共 **{len(design_df)}** 组实验")
         st.dataframe(design_df.round(3), use_container_width=True, hide_index=True)
-
         csv = design_df.to_csv(index=False)
         st.download_button("📥 下载设计矩阵 (CSV)", csv, "design_matrix.csv", "text/csv")
+    elif st.session_state.get("design_error"):
+        st.error(f"设计生成失败: {st.session_state['design_error']}")
 
-        with st.expander("📖 设计类型说明"):
-            if design_type == "指定水平全因子设计":
-                st.markdown("""
-                **指定水平全因子设计** 使用你在上方设定的三水平组合（低 / 中 / 高）：
-                - 每个因子取 **3 个水平**（低水平 -1、中水平 0、高水平 +1）
-                - 共 $3^{k}$ 组实验（当前 $k = %d$，即 $3 \\times 3 \\times 3 = %d$ 组）
-                """ % (len(factor_specs), 3 ** len(factor_specs)))
-            elif "CCD" in design_type:
-                st.markdown("""
-                **中心复合设计 (Central Composite Design)** 由三部分组成：
-                - **因子部分**：$2^k$ 全因子或部分因子设计点
-                - **轴向点**：沿每个轴正负方向各一个点（距中心 $\\alpha$）
-                - **中心点**：重复的中心实验点
+    with st.expander("📖 设计类型说明"):
+        if design_type == "指定水平全因子设计":
+            st.markdown("""
+            **指定水平全因子设计** 使用你在上方设定的三水平组合（低 / 中 / 高）：
+            - 每个因子取 **3 个水平**（低水平 -1、中水平 0、高水平 +1）
+            - 共 $3^{k}$ 组实验（当前 $k = %d$，即 $3 \\times 3 \\times 3 = %d$ 组）
+            """ % (len(factor_specs), 3 ** len(factor_specs)))
+        elif "CCD" in design_type:
+            st.markdown("""
+            **中心复合设计 (Central Composite Design)** 由三部分组成：
+            - **因子部分**：$2^k$ 全因子或部分因子设计点
+            - **轴向点**：沿每个轴正负方向各一个点（距中心 $\\alpha$）
+            - **中心点**：重复的中心实验点
 
-                设计参数:
-                - **circumscribed**: 轴向点在立方体外部 ($\\alpha > 1$)
-                - **inscribed**: 轴向点在立方体内部
-                - **faced**: 轴向点在面中心 ($\\alpha = 1$)
-                """)
-            elif "BBD" in design_type:
-                st.markdown("""
-                **Box-Behnken 设计** 的特点：
-                - 三水平设计，每次只在两个因子的中点和端点取值
-                - 不包含极端顶点（所有因子同时取最高/最低水平的组合）
-                - 实验次数通常少于 CCD
-                - 适合因子 ≥ 3 的情况
-                """)
-            else:
-                st.markdown("""
-                **全因子设计** 是最完整的设计：
-                - 所有因子水平的完全组合
-                - 实验次数 = $levels^k$（增长极快！）
-                - 可估计所有主效应和交互作用
-                """)
-    except Exception as e:
-        st.error(f"设计生成失败: {e}")
+            设计参数:
+            - **circumscribed**: 轴向点在立方体外部 ($\\alpha > 1$)
+            - **inscribed**: 轴向点在立方体内部
+            - **faced**: 轴向点在面中心 ($\\alpha = 1$)
+            """)
+        elif "BBD" in design_type:
+            st.markdown("""
+            **Box-Behnken 设计** 的特点：
+            - 三水平设计，每次只在两个因子的中点和端点取值
+            - 不包含极端顶点（所有因子同时取最高/最低水平的组合）
+            - 实验次数通常少于 CCD
+            - 适合因子 ≥ 3 的情况
+            """)
+        else:
+            st.markdown("""
+            **全因子设计** 是最完整的设计：
+            - 所有因子水平的完全组合
+            - 实验次数 = $levels^k$（增长极快！）
+            - 可估计所有主效应和交互作用
+            """)
 
 # ══════════════════════════════════════════════════════════════════
 #  PAGE 3 — 模型拟合
