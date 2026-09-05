@@ -1,5 +1,6 @@
 """RSM 响应面分析 — 交互式教学平台."""
 
+import hashlib
 import itertools
 
 import streamlit as st
@@ -19,7 +20,6 @@ PAGES = {
     "🏠 概述与原理": "overview",
     "🧪 实验设计": "design",
     "📊 模型拟合": "fitting",
-    "🎯 优化分析": "optimization",
     "🔬 完整案例": "case_study",
 }
 
@@ -411,11 +411,12 @@ elif page_key == "design":
 #  PAGE 3 — 模型拟合
 # ══════════════════════════════════════════════════════════════════
 elif page_key == "fitting":
-    st.title("📊 模型拟合与诊断")
+    st.title("📊 模型拟合与优化")
+    st.caption("上传数据 → 确认因子和响应列 → 选择优化目标 → 点击优化生成结果")
+    data_source = st.radio("数据来源", ["📂 上传数据", "🎮 内置示例"], horizontal=True)
+    X = y = design_df = None
 
-    tab_demo, tab_upload = st.tabs(["🎮 内置示例", "📂 上传数据"])
-
-    with tab_demo:
+    if data_source == "🎮 内置示例":
         st.markdown("使用模拟数据探索模型拟合过程。")
         st.markdown("#### 调节真实模型参数（模拟数据生成器）")
         c1, c2, c3 = st.columns(3)
@@ -445,185 +446,153 @@ elif page_key == "fitting":
         y = y_true + np.random.normal(0, noise_level, len(y_true))
         design_df["y_响应值"] = y
 
-    with tab_upload:
-        st.markdown("上传自己的数据 (CSV格式，前几列为因子，最后一列为响应值)")
+    else:
+        st.markdown("上传 CSV 数据，默认前几列为因子，最后一列为响应值。")
         uploaded = st.file_uploader("选择CSV文件", type=["csv"])
         if uploaded is not None:
-            upload_df = pd.read_csv(uploaded)
-            st.dataframe(upload_df.head())
-            factor_cols = st.multiselect("选择因子列", upload_df.columns.tolist(), default=upload_df.columns[:-1].tolist())
-            response_col = st.selectbox("选择响应列", upload_df.columns.tolist(), index=len(upload_df.columns) - 1)
-
-            if factor_cols and response_col:
-                factors = [Factor(c, upload_df[c].min(), upload_df[c].max()) for c in factor_cols]
-                designer = ExperimentDesigner(factors)
-                X = designer.encode_df(upload_df[factor_cols])
-                y = upload_df[response_col].values
-                design_df = upload_df.copy()
+            try:
+                upload_df = pd.read_csv(uploaded)
+                if upload_df.empty or len(upload_df.columns) < 2:
+                    raise ValueError("数据至少需要一列因子、一列响应值和一行实验记录。")
+                st.dataframe(upload_df.head(), use_container_width=True)
+                response_col = st.selectbox("选择响应列", upload_df.columns.tolist(), index=len(upload_df.columns) - 1)
+                available_factors = [c for c in upload_df.columns if c != response_col]
+                factor_cols = st.multiselect("选择因子列", available_factors, default=available_factors)
+                if not factor_cols:
+                    st.info("请至少选择一个因子列。")
+                else:
+                    numeric_df = upload_df[factor_cols + [response_col]].apply(pd.to_numeric, errors="raise")
+                    if not np.isfinite(numeric_df.to_numpy(dtype=float)).all():
+                        raise ValueError("所选因子和响应列不能包含空值或无穷值。")
+                    constant_cols = [c for c in factor_cols if numeric_df[c].nunique() < 2]
+                    if constant_cols:
+                        raise ValueError(f"以下因子没有变化，无法编码：{', '.join(constant_cols)}")
+                    factors = [Factor(c, numeric_df[c].min(), numeric_df[c].max()) for c in factor_cols]
+                    designer = ExperimentDesigner(factors)
+                    X = designer.encode_df(numeric_df[factor_cols])
+                    y = numeric_df[response_col].to_numpy(dtype=float)
+                    design_df = upload_df.copy()
+            except (ValueError, UnicodeError, pd.errors.ParserError) as exc:
+                st.error(f"数据无法用于拟合：{exc}")
+        else:
+            st.info("请先上传实验数据，完成拟合后即可进行优化分析。")
 
     st.markdown("---")
     st.subheader("数据预览")
-    if "design_df" in dir() and design_df is not None:
+    if design_df is not None:
         st.dataframe(design_df.round(4), use_container_width=True, hide_index=True)
 
-    if "X" in dir() and "y" in dir():
+    if X is not None and y is not None:
         order = st.radio("模型阶次", [1, 2], index=1, horizontal=True)
         model = RSMModel(order=order)
         model.fit(X, y, factor_names=[f.name for f in factors])
 
-        st.markdown("---")
-        st.subheader("回归系数")
-        coef_df = model.coefficient_table()
-        st.dataframe(coef_df, use_container_width=True, hide_index=True)
+        fit_tab, opt_tab = st.tabs(["📊 拟合与诊断", "🎯 优化分析"])
+        with fit_tab:
+            st.markdown("---")
+            st.subheader("回归系数")
+            coef_df = model.coefficient_table()
+            st.dataframe(coef_df, use_container_width=True, hide_index=True)
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("R²", f"{model.r_squared:.4f}")
-        c2.metric("Adj R²", f"{model.adj_r_squared:.4f}")
-        c3.metric("RMSE", f"{model.rmse:.4f}")
-        c4.metric("样本数", model.n)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("R²", f"{model.r_squared:.4f}")
+            c2.metric("Adj R²", f"{model.adj_r_squared:.4f}")
+            c3.metric("RMSE", f"{model.rmse:.4f}")
+            c4.metric("样本数", model.n)
 
-        st.markdown("---")
-        st.subheader("方差分析 (ANOVA)")
-        anova_summary_df = model.anova_table(detail="summary")
-        anova_term_df = model.anova_table(detail="terms")
-        anova_tab1, anova_tab2 = st.tabs(["整体 ANOVA", "按因子/项 ANOVA"])
-        with anova_tab1:
-            st.dataframe(anova_summary_df, use_container_width=True, hide_index=True)
-        with anova_tab2:
-            st.caption("按因子/项表使用顺序平方和，展示各线性项、二次项和交互项对模型解释度的贡献。")
-            st.dataframe(anova_term_df, use_container_width=True, hide_index=True)
+            st.markdown("---")
+            st.subheader("方差分析 (ANOVA)")
+            anova_summary_df = model.anova_table(detail="summary")
+            anova_term_df = model.anova_table(detail="terms")
+            anova_tab1, anova_tab2 = st.tabs(["整体 ANOVA", "按因子/项 ANOVA"])
+            with anova_tab1:
+                st.dataframe(anova_summary_df, use_container_width=True, hide_index=True)
+            with anova_tab2:
+                st.caption("按因子/项表使用顺序平方和，展示各线性项、二次项和交互项对模型解释度的贡献。")
+                st.dataframe(anova_term_df, use_container_width=True, hide_index=True)
 
-        st.markdown("---")
-        st.subheader("残差诊断")
-        viz = RSMVisualizer(model, factor_names=[f.name for f in factors])
-        st.plotly_chart(viz.residual_diagnostics(), use_container_width=True)
+            st.markdown("---")
+            st.subheader("残差诊断")
+            viz = RSMVisualizer(model, factor_names=[f.name for f in factors])
+            st.plotly_chart(viz.residual_diagnostics(), use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("响应面可视化")
-        if len(factors) >= 2:
-            vc1, vc2 = st.columns(2)
-            with vc1:
-                st.plotly_chart(viz.surface_3d(0, 1), use_container_width=True)
-            with vc2:
-                st.plotly_chart(viz.contour(0, 1), use_container_width=True)
-
-        st.subheader("扰动图与交互作用图")
-        vc3, vc4 = st.columns(2)
-        with vc3:
-            st.plotly_chart(viz.perturbation_plot(), use_container_width=True)
-        with vc4:
+            st.markdown("---")
+            st.subheader("响应面可视化")
             if len(factors) >= 2:
-                st.plotly_chart(viz.interaction_plot(0, 1), use_container_width=True)
+                vc1, vc2 = st.columns(2)
+                with vc1:
+                    st.plotly_chart(viz.surface_3d(0, 1), use_container_width=True)
+                with vc2:
+                    st.plotly_chart(viz.contour(0, 1), use_container_width=True)
 
-# ══════════════════════════════════════════════════════════════════
-#  PAGE 4 — 优化分析
-# ══════════════════════════════════════════════════════════════════
-elif page_key == "optimization":
-    st.title("🎯 优化分析")
+            st.subheader("扰动图与交互作用图")
+            vc3, vc4 = st.columns(2)
+            with vc3:
+                st.plotly_chart(viz.perturbation_plot(), use_container_width=True)
+            with vc4:
+                if len(factors) >= 2:
+                    st.plotly_chart(viz.interaction_plot(0, 1), use_container_width=True)
 
-    st.markdown("""
-    在拟合好响应面模型后，我们可以利用数学优化方法在实验区域内寻找使响应达到最大（或最小）的因子组合。
-    """)
+        with opt_tab:
+            st.subheader("优化分析")
+            st.caption("使用当前数据拟合的模型，在各因子的低水平与高水平之间寻找最优组合（编码范围 -1 至 1）。")
+            st.dataframe(designer.summary(), use_container_width=True, hide_index=True)
+            opt_goal = st.radio("优化目标", ["最大化", "最小化"], horizontal=True, key="fit_opt_goal")
+            signature = hashlib.sha256(
+                np.asarray(X, dtype=float).tobytes()
+                + np.asarray(y, dtype=float).tobytes()
+                + repr((data_source, [(f.name, f.low, f.high) for f in factors], order, opt_goal)).encode()
+            ).hexdigest()
+            if st.session_state.get("fit_opt_signature") != signature:
+                st.session_state.pop("fit_opt_result", None)
+                st.session_state["fit_opt_signature"] = signature
 
-    st.subheader("设定优化问题")
-    c1, c2 = st.columns(2)
-    with c1:
-        n_factors_opt = st.slider("因子数", 2, 4, 2, key="opt_nf")
-        opt_goal = st.radio("优化目标", ["最大化", "最小化"], horizontal=True)
-    with c2:
-        coded_lb = st.number_input("编码值下界", value=-1.5)
-        coded_ub = st.number_input("编码值上界", value=1.5)
+            identifiable = np.linalg.matrix_rank(model._X_design) == model.p
+            if not identifiable:
+                st.warning("当前数据不足以确定所选阶次的模型，请增加独立实验点、减少因子或降低模型阶次后再优化。")
+            if st.button("🚀 运行优化", type="primary", disabled=not identifiable):
+                st.session_state.pop("fit_opt_result", None)
+                try:
+                    with st.spinner("正在寻找最优因子组合…"):
+                        result = RSMOptimizer(model, factors).optimize(
+                            maximize=(opt_goal == "最大化"), coded_bounds=(-1.0, 1.0)
+                        )
+                    if result.success and np.isfinite(result.predicted_response):
+                        st.session_state["fit_opt_result"] = result
+                    else:
+                        st.error("优化未收敛，请检查数据或调整模型后重试。")
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    st.error(f"优化失败：{exc}")
 
-    factors = [Factor(f"x{i+1}", -1, 1) for i in range(n_factors_opt)]
-    designer = ExperimentDesigner(factors)
-
-    st.markdown("#### 模拟真实模型参数")
-    coef_cols = st.columns(3)
-    with coef_cols[0]:
-        ob0 = st.number_input("β₀", value=80.0, key="ob0")
-    params = {"b0": ob0}
-    betas_linear = []
-    betas_quad = []
-    betas_inter = []
-    with coef_cols[1]:
-        for i in range(n_factors_opt):
-            v = st.number_input(f"β_{i+1}", value=[3.0, -2.0, 1.0, 0.5][i], key=f"ob{i+1}")
-            betas_linear.append(v)
-    with coef_cols[2]:
-        for i in range(n_factors_opt):
-            v = st.number_input(f"β_{i+1}{i+1}", value=[-4.0, -3.0, -2.0, -1.5][i], key=f"ob{i+1}{i+1}")
-            betas_quad.append(v)
-    for i in range(n_factors_opt):
-        for j in range(i + 1, n_factors_opt):
-            v = st.number_input(f"β_{i+1}{j+1}", value=1.0, key=f"ob{i+1}{j+1}")
-            betas_inter.append(v)
-
-    if n_factors_opt >= 3:
-        design_df = designer.box_behnken()
+            result = st.session_state.get("fit_opt_result")
+            if result is not None:
+                st.subheader("优化结果")
+                st.metric(f"预测响应（{opt_goal}）", f"{result.predicted_response:.4f}")
+                st.dataframe(pd.DataFrame({
+                    "因子": result.factor_names,
+                    "最优自然值": result.optimal_natural,
+                    "最优编码值": result.optimal_coded,
+                }), use_container_width=True, hide_index=True)
+                st.caption("结果为模型预测值，可按上述因子组合进行实验验证。")
+                if order == 2:
+                    with st.expander("典型分析"):
+                        canonical = RSMOptimizer(model, factors).canonical_analysis()
+                        st.markdown(f"**曲面形态**：{canonical['曲面形态']}")
+                        st.markdown(f"**驻点预测值**：{canonical['驻点预测值']:.4f}")
+                        st.dataframe(pd.DataFrame({
+                            "因子": result.factor_names,
+                            "驻点(编码)": canonical["驻点(编码)"],
+                            "驻点(自然)": canonical["驻点(自然)"],
+                        }), use_container_width=True, hide_index=True)
+                        st.write("特征值：", canonical["特征值"])
+            elif identifiable:
+                st.info("选择优化目标后，点击「🚀 运行优化」生成结果。")
     else:
-        design_df = designer.central_composite()
-
-    coded_cols = [c for c in design_df.columns if c.startswith("coded_")]
-    X = design_df[coded_cols].values
-    y = np.full(len(X), ob0)
-    for i in range(n_factors_opt):
-        y = y + betas_linear[i] * X[:, i] + betas_quad[i] * X[:, i]**2
-    inter_idx = 0
-    for i in range(n_factors_opt):
-        for j in range(i + 1, n_factors_opt):
-            y = y + betas_inter[inter_idx] * X[:, i] * X[:, j]
-            inter_idx += 1
-    np.random.seed(123)
-    y = y + np.random.normal(0, 0.3, len(y))
-
-    model = RSMModel(order=2)
-    model.fit(X, y, factor_names=[f.name for f in factors])
-    optimizer = RSMOptimizer(model, factors)
-
-    if st.button("🚀 运行优化", type="primary"):
-        result = optimizer.optimize(maximize=(opt_goal == "最大化"), coded_bounds=(coded_lb, coded_ub))
-        canonical = optimizer.canonical_analysis()
-
-        st.markdown("---")
-        st.subheader("优化结果")
-        res_cols = st.columns(n_factors_opt + 1)
-        for i, f in enumerate(factors):
-            res_cols[i].metric(f.name, f"{result.optimal_coded[i]:.4f}", delta=f"自然值: {result.optimal_natural[i]:.4f}")
-        res_cols[-1].metric("预测响应", f"{result.predicted_response:.4f}")
-
-        st.markdown("---")
-        st.subheader("典型分析")
-        ca_c1, ca_c2 = st.columns(2)
-        with ca_c1:
-            st.markdown(f"**曲面形态**: {canonical['曲面形态']}")
-            st.markdown(f"**驻点预测值**: {canonical['驻点预测值']:.4f}")
-            sp_df = pd.DataFrame({
-                "因子": [f.name for f in factors],
-                "驻点(编码)": canonical["驻点(编码)"],
-                "驻点(自然)": canonical["驻点(自然)"],
-            })
-            st.dataframe(sp_df, hide_index=True)
-        with ca_c2:
-            st.markdown("**特征值**:")
-            eig_df = pd.DataFrame({
-                "特征值": canonical["特征值"],
-                "含义": ["凹(极大方向)" if e < 0 else "凸(极小方向)" for e in canonical["特征值"]],
-            })
-            st.dataframe(eig_df, hide_index=True)
-
-        st.markdown("---")
-        st.subheader("可视化")
-        viz = RSMVisualizer(model, factor_names=[f.name for f in factors])
-        if n_factors_opt >= 2:
-            vis_c1, vis_c2 = st.columns(2)
-            with vis_c1:
-                st.plotly_chart(viz.surface_3d(0, 1), use_container_width=True)
-            with vis_c2:
-                st.plotly_chart(viz.contour(0, 1), use_container_width=True)
-        st.plotly_chart(viz.perturbation_plot(), use_container_width=True)
+        st.session_state.pop("fit_opt_result", None)
+        st.session_state.pop("fit_opt_signature", None)
 
 # ══════════════════════════════════════════════════════════════════
-#  PAGE 5 — 完整案例
+#  PAGE 4 — 完整案例
 # ══════════════════════════════════════════════════════════════════
 elif page_key == "case_study":
     st.title("🔬 完整案例：酶催化反应优化")
